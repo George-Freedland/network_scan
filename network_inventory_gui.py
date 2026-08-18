@@ -76,6 +76,8 @@ def run_scan(params: dict[str, list[str]]) -> dict[str, Any]:
         no_probe=flag("no_probe"),
         offline=flag("offline"),
         no_bluetooth=flag("no_bluetooth"),
+        ble_scan=flag("ble_scan"),
+        ble_seconds=float(params.get("ble_seconds", ["6.0"])[0]),
         subnet=(params.get("subnet", [""])[0] or None),
         mdns_seconds=float(params.get("mdns_seconds", ["3.0"])[0]),
         probe_timeout=float(params.get("probe_timeout", ["0.45"])[0]),
@@ -217,6 +219,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <label class="opt"><input type="checkbox" id="opt_offline"> Offline</label>
     <label class="opt"><input type="checkbox" id="opt_no_probe"> No port probe</label>
     <label class="opt"><input type="checkbox" id="opt_bt" checked> Bluetooth</label>
+    <label class="opt"><input type="checkbox" id="opt_ble"> Nearby BLE</label>
     <input type="text" id="opt_subnet" placeholder="subnet (auto)">
     <button id="run">Run scan</button>
     <button id="save" class="secondary" disabled>Save JSON</button>
@@ -234,6 +237,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <div class="tab active" data-tab="hosts">Hosts</div>
       <div class="tab" data-tab="exposure">Exposure</div>
       <div class="tab" data-tab="bluetooth">Bluetooth</div>
+      <div class="tab" data-tab="ble">Nearby BLE</div>
       <div class="tab" data-tab="device">This device</div>
       <div class="tab" data-tab="raw">Raw JSON</div>
     </div>
@@ -257,6 +261,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     <div class="panel" id="panel-exposure"></div>
     <div class="panel" id="panel-bluetooth"></div>
+    <div class="panel" id="panel-ble"></div>
     <div class="panel" id="panel-device"></div>
     <div class="panel" id="panel-raw"><div class="log" style="max-height:600px" id="rawjson"></div></div>
   </div>
@@ -300,6 +305,7 @@ async function runScan(){
     offline: $("#opt_offline").checked?1:0,
     no_probe: $("#opt_no_probe").checked?1:0,
     no_bluetooth: $("#opt_bt").checked?0:1,
+    ble_scan: $("#opt_ble").checked?1:0,
     subnet: $("#opt_subnet").value.trim(),
   });
   try{
@@ -342,6 +348,7 @@ function render(){
     ["Hosts", REPORT.host_count],["Others", REPORT.other_host_count],
     ["Exposure notes", (REPORT.hosts||[]).filter(h=>(h.risks||[]).length).length],
     ["Bluetooth", (REPORT.bluetooth&&REPORT.bluetooth.devices||[]).length],
+    ["Nearby BLE", (REPORT.ble_scan&&REPORT.ble_scan.devices||[]).length],
   ], (REPORT.host_count||0)+" devices");
   cards += card("This device", [
     ["Model", dev.sysctl&&dev.sysctl["hw.model"]],["macOS", dev.sw_vers&&dev.sw_vers.ProductVersion],
@@ -352,6 +359,7 @@ function render(){
   renderHosts();
   renderExposure();
   renderBluetooth();
+  renderBle();
   renderDevice();
   $("#rawjson").textContent = JSON.stringify(REPORT, null, 2);
 }
@@ -442,7 +450,32 @@ function renderBluetooth(){
   el.innerHTML = `<div class="cards">${h.split("</div>")[0]}</div>` + h.substring(h.indexOf("</div>")+6);
 }
 
-function renderDevice(){
+function renderBle(){
+  const ble = REPORT.ble_scan||{}; const el = $("#panel-ble");
+  if(!ble || (!ble.supported && !ble.available && !ble.error && !(ble.devices||[]).length)){
+    el.innerHTML = `<div class="empty">Nearby BLE scan was not run. Enable “Nearby BLE” and scan again.</div>`; return;
+  }
+  if(ble.supported===false){
+    el.innerHTML = `<div class="empty">Install <code>bleak</code> to scan nearby BLE devices:<br><br><code>pip install bleak</code></div>`; return;
+  }
+  if(!ble.available){
+    el.innerHTML = `<div class="empty">BLE scan failed: ${esc(ble.error||"unknown")}<br><span class="muted">On macOS, grant your terminal Bluetooth permission and retry.</span></div>`; return;
+  }
+  const devs = ble.devices||[];
+  let h = `<p class="muted">Receive-only: reads advertisements devices already broadcast. Nothing is paired or contacted. ${devs.length} advertisers, ${ble.named_count||0} named.</p>`;
+  h += `<table><thead><tr><th>Name / type</th><th>RSSI</th><th>Apple</th><th>Manufacturer</th><th>Svcs</th><th>ID</th></tr></thead><tbody>`;
+  for(const d of devs){
+    const nm = esc(d.name || d.guess || "(unnamed)");
+    const gtype = (d.guess && d.guess!==d.name) ? `<div class="muted">${esc(d.guess)}</div>` : "";
+    const rssi = d.rssi==null ? '<span class="muted">—</span>' : esc(d.rssi)+" dBm";
+    h += `<tr><td>${nm}${gtype}</td><td>${rssi}</td><td>${esc(d.apple_type||"")}</td>
+      <td>${esc((d.companies||[]).slice(0,3).join(", "))}</td>
+      <td class="muted">${(d.service_uuids||[]).length||""}</td>
+      <td class="muted" style="font-size:11px">${esc(d.address||"")}</td></tr>`;
+  }
+  h += `</tbody></table>`;
+  el.innerHTML = h;
+}
   const d = REPORT.device||{}; const s = d.sysctl||{}, sw = d.sw_vers||{}, io = d.ioreg||{}, names = d.macos_names||{};
   let cards = "";
   cards += card("Identity", [["Computer", names.ComputerName],["Hostname", names.LocalHostName],

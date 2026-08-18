@@ -1015,6 +1015,176 @@ def collect_bluetooth() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Nearby BLE scan (optional, needs `bleak`) — receive-oriented, notifies no one
+# ---------------------------------------------------------------------------
+
+# Registered Bluetooth SIG company identifiers (small common subset). Unknown
+# IDs are shown as hex. See the SIG assigned-numbers list for the full set.
+BLE_COMPANY_IDS = {
+    0x004C: "Apple",
+    0x0006: "Microsoft",
+    0x0075: "Samsung",
+    0x00E0: "Google",
+    0x0171: "Amazon",
+    0x0087: "Garmin",
+    0x00D2: "Bose",
+    0x05A7: "Sonos",
+    0x0157: "Huami (Amazfit/Xiaomi)",
+    0x038F: "Xiaomi",
+    0x0499: "Ruuvi",
+    0x0059: "Nordic Semiconductor",
+    0x000F: "Broadcom",
+    0x0131: "Cypress",
+    0x004F: "APT (Airoha)",
+    0x022B: "Tile",
+    0x0110: "Fitbit",
+    0x0201: "GN Netcom (Jabra)",
+    0x00C4: "LG Electronics",
+    0x0001: "Nokia",
+    0x0118: "Sony",
+    0x03DA: "Logitech",
+    0x0180: "Dexcom",
+    0x0A8D: "Govee",
+}
+
+# First byte of Apple's 0x004C manufacturer payload -> what it advertises.
+APPLE_BLE_TYPES = {
+    0x02: "iBeacon",
+    0x05: "AirDrop",
+    0x07: "Proximity Pairing (AirPods/Beats)",
+    0x09: "AirPlay target",
+    0x0A: "AirPlay source",
+    0x0B: "Watch nearby",
+    0x0C: "Handoff",
+    0x0D: "Wi-Fi settings",
+    0x0E: "Hotspot",
+    0x0F: "Wi-Fi join",
+    0x10: "Nearby (iPhone/iPad)",
+    0x12: "Find My (AirTag / offline finding)",
+    0x16: "Find My",
+}
+
+
+def _apple_ble_hint(payload: bytes) -> str | None:
+    if not payload:
+        return None
+    return APPLE_BLE_TYPES.get(payload[0])
+
+
+def _ble_company_name(cid: int) -> str:
+    return BLE_COMPANY_IDS.get(cid, f"0x{cid:04x}")
+
+
+def collect_ble_scan(seconds: float = 6.0) -> dict[str, Any]:
+    """Discover nearby BLE devices that are broadcasting advertisements.
+
+    This uses the optional `bleak` package. It listens for advertising packets
+    and reads the public advertisement fields (name, RSSI, manufacturer data,
+    service UUIDs). It never pairs, connects, or writes, so no device shows a
+    prompt and no person is notified — it is receive-oriented discovery of data
+    the devices are already broadcasting to everyone in range.
+    """
+    result: dict[str, Any] = {"available": False, "supported": True, "devices": [], "error": None}
+    try:
+        from bleak import BleakScanner  # type: ignore
+    except Exception:
+        result["supported"] = False
+        result["error"] = "bleak not installed (pip install bleak)"
+        return result
+
+    import asyncio
+
+    async def _scan() -> dict[str, Any]:
+        return await BleakScanner.discover(timeout=seconds, return_adv=True)
+
+    try:
+        found = asyncio.run(_scan())
+    except Exception as exc:  # permission denied, adapter off, etc.
+        result["error"] = str(exc)
+        return result
+
+    result["available"] = True
+    devices = []
+    for addr, pair in found.items():
+        try:
+            dev, adv = pair
+        except (TypeError, ValueError):
+            dev, adv = pair, None
+        mfg = getattr(adv, "manufacturer_data", None) or {}
+        companies = [_ble_company_name(cid) for cid in mfg]
+        apple_hint = None
+        if 0x004C in mfg:
+            apple_hint = _apple_ble_hint(bytes(mfg[0x004C]))
+        name = getattr(adv, "local_name", None) or getattr(dev, "name", None)
+        rssi = getattr(adv, "rssi", None)
+        if rssi in (127, None):  # 127 = CoreBluetooth "RSSI unavailable"
+            rssi = None
+        devices.append({
+            "address": addr,
+            "name": name,
+            "rssi": rssi,
+            "tx_power": getattr(adv, "tx_power", None),
+            "companies": companies,
+            "apple_type": apple_hint,
+            "service_uuids": list(getattr(adv, "service_uuids", None) or []),
+            "guess": _guess_ble_type(name, companies, apple_hint),
+        })
+    devices.sort(key=lambda d: (d["rssi"] if d["rssi"] is not None else -999), reverse=True)
+    result["devices"] = devices
+    result["named_count"] = sum(1 for d in devices if d["name"])
+    return result
+
+
+def _guess_ble_type(name: str | None, companies: list[str], apple_hint: str | None) -> str | None:
+    blob = (name or "").lower()
+    rules = [
+        ("govee", "Govee sensor/light"),
+        ("airtag", "Apple AirTag"),
+        ("airpods", "AirPods"),
+        ("beats", "Beats headphones"),
+        ("tile", "Tile tracker"),
+        ("ruuvi", "RuuviTag sensor"),
+        ("flic", "Flic button"),
+        ("mi ", "Xiaomi/Mi device"),
+        ("amazfit", "Amazfit wearable"),
+        ("fitbit", "Fitbit wearable"),
+        ("garmin", "Garmin wearable"),
+        ("bose", "Bose audio"),
+        ("sony", "Sony audio"),
+        ("jbl", "JBL speaker"),
+        ("srs-", "Sony speaker"),
+        ("sense", "Sensor"),
+        ("thermo", "Thermometer/sensor"),
+        ("scale", "Smart scale"),
+        ("watch", "Smartwatch"),
+        ("band", "Fitness band"),
+        ("bulb", "Smart bulb"),
+        ("lamp", "Smart light"),
+        ("cam", "Camera"),
+        ("lock", "Smart lock"),
+        ("tv", "TV / media device"),
+    ]
+    for needle, label in rules:
+        if needle in blob:
+            return label
+    if apple_hint:
+        if "Find My" in apple_hint:
+            return "Apple Find My tag/device"
+        if "Proximity" in apple_hint:
+            return "AirPods / Beats (nearby)"
+        if "Nearby" in apple_hint:
+            return "iPhone / iPad (nearby)"
+        if "Watch" in apple_hint:
+            return "Apple Watch (nearby)"
+        return f"Apple device ({apple_hint})"
+    if companies:
+        known = [c for c in companies if not c.startswith("0x")]
+        if known:
+            return f"{known[0]} device"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Wi-Fi / LAN session
 # ---------------------------------------------------------------------------
 
@@ -2618,6 +2788,42 @@ def print_bluetooth(bt: dict[str, Any]) -> None:
         print("  Bluetooth is on but no devices are currently paired/known.")
 
 
+def print_ble_scan(ble: dict[str, Any]) -> None:
+    if not ble:
+        return
+    if not ble.get("supported"):
+        heading("Nearby BLE scan")
+        print(_c(Style.DIM, "  Skipped — `bleak` is not installed (pip install bleak)."))
+        return
+    if not ble.get("available"):
+        heading("Nearby BLE scan")
+        print(_c(Style.YELLOW, f"  Scan failed: {ble.get('error', 'unknown error')}"))
+        print(_c(Style.DIM, "  On macOS, grant your terminal Bluetooth permission and retry."))
+        return
+    devices = ble.get("devices") or []
+    named = ble.get("named_count", 0)
+    heading(f"Nearby BLE scan  ({len(devices)} advertisers, {named} named)")
+    print(_c(Style.DIM, "  Receive-only: reads advertisements devices already broadcast; nothing is paired or contacted."))
+    for dev in devices:
+        label = dev.get("name") or dev.get("guess") or "(unnamed)"
+        rssi = dev.get("rssi")
+        line = _c(Style.BOLD, f"  {label}")
+        if rssi is not None:
+            line += _c(Style.DIM, f"  {rssi} dBm")
+        print(line)
+        bits = []
+        if dev.get("guess") and dev.get("guess") != dev.get("name"):
+            bits.append(f"type={dev['guess']}")
+        if dev.get("apple_type"):
+            bits.append(f"apple={dev['apple_type']}")
+        if dev.get("companies"):
+            bits.append("mfr=" + ", ".join(dev["companies"][:3]))
+        if dev.get("service_uuids"):
+            bits.append(f"services={len(dev['service_uuids'])}")
+        bits.append(f"id={dev.get('address')}")
+        print(_c(Style.DIM, "      " + "  |  ".join(bits)))
+
+
 def print_notes(net: str | None) -> None:
     heading("Notes")
     print("  • Sleeping phones often omit ARP until they talk; rerun while they are awake.")
@@ -2661,6 +2867,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         print(_c(Style.DIM, "  Reading paired/connected Bluetooth (silent, local only)…"))
         bluetooth = collect_bluetooth()
 
+    ble: dict[str, Any] = {}
+    if getattr(args, "ble_scan", False):
+        secs = getattr(args, "ble_seconds", 6.0)
+        print(_c(Style.DIM, f"  Scanning nearby BLE advertisers for {secs:.0f}s (receive-only)…"))
+        ble = collect_ble_scan(secs)
+
     hosts: list[Host] = []
     subnet = wifi.get("subnet")
     if subnet:
@@ -2685,11 +2897,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "wifi_summary": summarize_wifi(wifi),
         "public_ip": public,
         "bluetooth": bluetooth,
+        "ble_scan": ble,
         "hosts": [asdict(h) for h in hosts],
         "host_count": len(hosts),
         "other_host_count": len([h for h in hosts if not h.is_self]),
     }
-    return report, hosts, self_ips, device, wifi, public, bluetooth
+    return report, hosts, self_ips, device, wifi, public, bluetooth, ble
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2706,6 +2919,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--mdns-seconds", type=float, default=3.0, help="How long to listen for Bonjour (default 3)")
     p.add_argument("--probe-timeout", type=float, default=0.45, help="Per-port connect timeout")
     p.add_argument("--no-bluetooth", action="store_true", help="Skip the silent Bluetooth inventory")
+    p.add_argument("--ble-scan", action="store_true", help="Scan for nearby BLE advertisers (needs `bleak`)")
+    p.add_argument("--ble-seconds", type=float, default=6.0, help="BLE scan duration (default 6)")
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     return p.parse_args(argv)
 
@@ -2716,7 +2931,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_color:
         IS_TTY = False
     try:
-        report, hosts, self_ips, device, wifi, public, bluetooth = build_report(args)
+        report, hosts, self_ips, device, wifi, public, bluetooth, ble = build_report(args)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
@@ -2736,6 +2951,7 @@ def main(argv: list[str] | None = None) -> int:
     print_device(device)
     print_wifi(wifi, public)
     print_bluetooth(bluetooth)
+    print_ble_scan(ble)
     print_hosts(hosts, self_ips)
     print_exposure(hosts)
     print_notes(wifi.get("subnet"))
