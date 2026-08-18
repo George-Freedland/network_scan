@@ -4,13 +4,16 @@ A single-file, zero-dependency Python tool that tells you everything it can abou
 
 - **this device** — hardware, macOS/kernel, serial, CPU/RAM, battery, every interface/IP/MAC, DNS, routes, listening ports, and current outbound connections;
 - **the Wi-Fi / LAN session** — SSID, channel, PHY, security, signal, DHCP, gateway, and your public/WAN IP (with a VPN tunnel called out separately so it never gets scanned as the LAN);
-- **every other host on your subnet** — IP, MAC, vendor, hostnames, Bonjour/mDNS services, **SSDP/UPnP model + manufacturer + serial**, a **TTL-based OS guess**, open identification ports with banners, a **best-effort device type**, and a **defensive exposure assessment**.
+- **every other host on your subnet** — IP, MAC, vendor, hostnames, Bonjour/mDNS services, **SSDP/UPnP model + manufacturer + serial**, a **TTL-based OS guess**, open identification ports with banners, a **best-effort device type**, and a **defensive exposure assessment**;
+- **paired/known Bluetooth devices** — controller info plus each device's name, address, type, vendor, RSSI, and battery, read silently from the local system inventory (no radio inquiry, nothing transmitted, no device contacted).
 
-It runs on the Python 3.9+ standard library alone and needs **no root**. Optional packages (below) make it even better if installed.
+It runs on the Python 3.9+ standard library alone and needs **no root**. Optional packages (below) make it even better if installed. Two front-ends share the same engine: the standalone CLI (`network_inventory.py`) and a local web dashboard (`network_inventory_gui.py`).
 
 > Use this only on networks you own or are explicitly authorized to inspect.
 
 ## Usage
+
+Command line (the standalone script — unchanged):
 
 ```bash
 python3 network_inventory.py                 # full human-readable report
@@ -18,10 +21,25 @@ python3 network_inventory.py --json -o report.json
 python3 network_inventory.py --fast          # quicker: gateway-only ping sweep, shorter listens
 python3 network_inventory.py --offline       # no public-IP / online MAC-vendor HTTP calls
 python3 network_inventory.py --no-probe      # skip connecting to identification ports
+python3 network_inventory.py --no-bluetooth  # skip the silent Bluetooth inventory
 python3 network_inventory.py --subnet 192.168.1.0/24
 ```
 
-Useful flags: `--mdns-seconds N` (Bonjour/SSDP listen time), `--probe-timeout S` (per-port connect timeout), `--no-color`.
+GUI (local web dashboard — opens in your browser, no dependencies):
+
+```bash
+python3 network_inventory_gui.py             # starts on http://127.0.0.1:8765 and opens it
+python3 network_inventory_gui.py --port 9000 --no-open
+```
+
+The dashboard has options (Fast / Offline / No probe / Bluetooth / subnet), a live
+progress log, a sortable + filterable host table with expandable details, and
+separate Exposure, Bluetooth, This-device, and Raw-JSON views (with a "Save JSON"
+button). The server binds to `127.0.0.1` only and gates its API with a per-session
+token, and it does not send CORS headers — so other websites and other machines
+cannot read your results.
+
+Useful CLI flags: `--mdns-seconds N` (Bonjour/SSDP listen time), `--probe-timeout S` (per-port connect timeout), `--no-color`.
 
 ## How devices are identified
 
@@ -63,3 +81,4 @@ For heavier analysis than this script targets, the ecosystem worth knowing:
 - Modern phones randomize their Wi-Fi MAC, which intentionally hides the vendor.
 - Some Wi-Fi fields (BSSID, RSSI) require Location permission or `sudo wdutil info` on recent macOS.
 - Discovery is limited to your `/24` even if the interface reports a larger prefix.
+- The Bluetooth list is **paired/known devices only**, read from the local system inventory — it is silent and contacts nothing. Discovering nearby *unpaired* devices would require an active BLE scan (e.g. the optional `bleak` package) and is intentionally not done.
