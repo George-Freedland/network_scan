@@ -476,6 +476,8 @@ function renderBle(){
   h += `</tbody></table>`;
   el.innerHTML = h;
 }
+
+function renderDevice(){
   const d = REPORT.device||{}; const s = d.sysctl||{}, sw = d.sw_vers||{}, io = d.ioreg||{}, names = d.macos_names||{};
   let cards = "";
   cards += card("Identity", [["Computer", names.ComputerName],["Hostname", names.LocalHostName],
