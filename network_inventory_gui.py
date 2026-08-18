@@ -187,7 +187,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line);
     border-radius:12px; overflow:hidden; }
   th,td { text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
-  th { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.5px; cursor:pointer; position:sticky; top:69px; background:var(--panel2); }
+  th { color:var(--dim); font-size:12px; text-transform:uppercase; letter-spacing:.5px; cursor:pointer; background:var(--panel2); }
   tr:last-child td { border-bottom:0; }
   tr.host { cursor:pointer; }
   tr.host:hover { background:#182234; }
@@ -433,8 +433,8 @@ function renderBluetooth(){
   const bt = REPORT.bluetooth||{}; const el = $("#panel-bluetooth");
   if(!bt.available){ el.innerHTML = `<div class="empty">No Bluetooth data (off or unsupported).</div>`; return; }
   const c = bt.controller||{};
-  let h = card("Controller", [["Chipset",c.chipset],["Firmware",c.firmware],["State",c.state],["Vendor",c.vendor],["Transport",c.transport]]);
   const devs = bt.devices||[];
+  let h = `<div class="cards">` + card("Controller", [["Chipset",c.chipset],["Firmware",c.firmware],["State",c.state],["Vendor",c.vendor],["Transport",c.transport]]) + `</div>`;
   h += `<p class="muted">Silent: paired/known devices macOS already tracks. Nothing was transmitted.</p>`;
   if(!devs.length){ h += `<div class="empty">Bluetooth on, but no paired/known devices right now.</div>`; }
   else {
@@ -447,7 +447,7 @@ function renderBluetooth(){
     }
     h += `</tbody></table>`;
   }
-  el.innerHTML = `<div class="cards">${h.split("</div>")[0]}</div>` + h.substring(h.indexOf("</div>")+6);
+  el.innerHTML = h;
 }
 
 function renderBle(){
