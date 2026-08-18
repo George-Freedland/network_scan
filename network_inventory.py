@@ -263,6 +263,31 @@ SSDP_HINTS = [
     ("kodi", "Kodi / media center"),
 ]
 
+# Chip/module maker in the OUI -> a reasonable device-class guess when nothing
+# else identifies the host. These vendors ship inside many consumer gadgets.
+VENDOR_HINTS = [
+    ("espressif", "ESP32/ESP8266 smart-home device"),
+    ("raspberry", "Raspberry Pi"),
+    ("amazon", "Amazon device (Echo / Fire / Kindle)"),
+    ("google", "Google / Nest device"),
+    ("nest", "Google Nest device"),
+    ("roku", "Roku"),
+    ("sonos", "Sonos speaker"),
+    ("tuya", "Tuya smart-home device"),
+    ("ring", "Ring device"),
+    ("wyze", "Wyze camera / sensor"),
+    ("ecobee", "ecobee thermostat"),
+    ("harman", "Harman/JBL speaker"),
+    ("azurewave", "Wi-Fi module (TV / console / IoT)"),
+    ("ampak", "Wi-Fi module (TV / IoT device)"),
+    ("gaoshengda", "Amazon/IoT device (Wi-Fi module)"),
+    ("cloud network technology", "Wi-Fi module (Foxconn — phone / IoT)"),
+    ("murata", "Wi-Fi module (IoT / appliance)"),
+    ("texas instruments", "IoT / embedded device (TI chip)"),
+    ("realtek", "IoT / embedded device (Realtek chip)"),
+    ("shenzhen", "IoT device (Shenzhen OEM)"),
+]
+
 OUI_FALLBACK: dict[str, str] = {
     "000C29": "VMware",
     "00155D": "Microsoft Hyper-V",
@@ -904,6 +929,89 @@ def collect_device() -> dict[str, Any]:
         "sockets": listening_and_connections(),
     }
     return device, ifaces
+
+
+# ---------------------------------------------------------------------------
+# Bluetooth (silent — reads local system inventory, transmits nothing)
+# ---------------------------------------------------------------------------
+
+def collect_bluetooth() -> dict[str, Any]:
+    """Paired/connected Bluetooth devices + controller, from system_profiler.
+
+    This only reads what macOS already knows locally. It does not power on the
+    radio, page, inquire, or advertise, so no nearby device is contacted or
+    notified. Nearby *unpaired* discovery would need an active scan and the
+    optional `bleak` package; it is intentionally not done here.
+    """
+    result: dict[str, Any] = {"controller": {}, "devices": [], "available": False}
+    if sys.platform != "darwin":
+        return result
+    out = run(["system_profiler", "SPBluetoothDataType", "-json"], timeout=20)
+    if not out.strip():
+        return result
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return result
+    blocks = data.get("SPBluetoothDataType") or []
+    if not blocks:
+        return result
+    result["available"] = True
+    block = blocks[0]
+
+    ctrl = block.get("controller_properties") or {}
+    result["controller"] = {
+        "chipset": ctrl.get("controller_chipset"),
+        "firmware": ctrl.get("controller_firmwareVersion"),
+        "address": ctrl.get("controller_address"),
+        "state": ctrl.get("controller_state"),
+        "discoverable": ctrl.get("controller_discoverable"),
+        "vendor": ctrl.get("controller_vendorID"),
+        "transport": ctrl.get("controller_transport"),
+        "services": ctrl.get("controller_supportedServices"),
+    }
+
+    def parse_devices(entries: list[Any], connected: bool) -> None:
+        for entry in entries or []:
+            if not isinstance(entry, dict):
+                continue
+            for name, props in entry.items():
+                if not isinstance(props, dict):
+                    continue
+                addr = props.get("device_address") or props.get("device_addr")
+                dev = {
+                    "name": name,
+                    "address": addr,
+                    "connected": connected,
+                    "minor_type": props.get("device_minorType") or props.get("device_minorClassOfDevice_string"),
+                    "major_type": props.get("device_majorType") or props.get("device_majorClassOfDevice_string"),
+                    "type": props.get("device_type"),
+                    "vendor_id": props.get("device_vendorID"),
+                    "product_id": props.get("device_productID"),
+                    "firmware": props.get("device_firmwareVersion"),
+                    "rssi": props.get("device_rssi") or props.get("device_RSSI"),
+                    "battery": props.get("device_batteryLevelMain") or props.get("device_batteryLevel"),
+                    "services": props.get("device_services"),
+                    "vendor": vendor_offline(addr) if addr else None,
+                }
+                result["devices"].append({k: v for k, v in dev.items() if v not in (None, "")})
+
+    for key in ("device_connected", "devices_list"):
+        parse_devices(block.get(key) or [], connected=(key == "device_connected"))
+    parse_devices(block.get("device_not_connected") or [], connected=False)
+
+    # De-dupe by address, prefer the connected record.
+    by_addr: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for dev in result["devices"]:
+        key = dev.get("address") or dev.get("name")
+        if key not in by_addr:
+            by_addr[key] = dev
+            order.append(key)
+        elif dev.get("connected") and not by_addr[key].get("connected"):
+            by_addr[key] = dev
+    result["devices"] = [by_addr[k] for k in order]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1949,6 +2057,11 @@ def guess_type(host: Host) -> str:
         return "Router / gateway"
     if host.model:
         return host.model
+    # Vendor-based guesses for silent, MAC-only hosts (Wi-Fi module / chip makers).
+    vlow = (host.vendor or "").lower()
+    for needle, label in VENDOR_HINTS:
+        if needle in vlow:
+            return label
     if host.vendor and "randomized" not in host.vendor and "administered" not in host.vendor:
         return f"Host ({host.vendor})"
     if host.os_guess and host.os_guess[0].isalpha() and not host.os_guess.startswith("TTL"):
@@ -2478,6 +2591,33 @@ def print_exposure(hosts: list[Host]) -> None:
     print(_c(Style.DIM, "  VLAN/SSID, patch firmware, and require strong unique device passwords."))
 
 
+def print_bluetooth(bt: dict[str, Any]) -> None:
+    if not bt or not bt.get("available"):
+        return
+    devices = bt.get("devices") or []
+    heading(f"Bluetooth  ({len(devices)} paired/known device(s))")
+    ctrl = bt.get("controller") or {}
+    if ctrl:
+        state = ctrl.get("state", "")
+        kv("Controller", f"{ctrl.get('chipset','?')}  fw {ctrl.get('firmware','?')}  ({state})")
+        kv("Vendor / transport", " / ".join(x for x in (ctrl.get("vendor"), ctrl.get("transport")) if x))
+    print(_c(Style.DIM, "  Silent: this reads devices macOS already knows; nothing is transmitted."))
+    for dev in devices:
+        line = _c(Style.BOLD, f"  {dev.get('name', 'Unknown')}")
+        if dev.get("connected"):
+            line += _c(Style.GREEN, "  [connected]")
+        print()
+        print(line)
+        kv("Address", dev.get("address"), indent=4)
+        kv("Type", dev.get("minor_type") or dev.get("major_type") or dev.get("type"), indent=4)
+        kv("Vendor", dev.get("vendor"), indent=4)
+        kv("RSSI", dev.get("rssi"), indent=4)
+        kv("Battery", dev.get("battery"), indent=4)
+        kv("Firmware", dev.get("firmware"), indent=4)
+    if not devices:
+        print("  Bluetooth is on but no devices are currently paired/known.")
+
+
 def print_notes(net: str | None) -> None:
     heading("Notes")
     print("  • Sleeping phones often omit ARP until they talk; rerun while they are awake.")
@@ -2485,6 +2625,7 @@ def print_notes(net: str | None) -> None:
     print("  • SSDP/UPnP + mDNS reveal models only for devices that advertise them.")
     print("  • BSSID / some Wi-Fi fields need Location permission (or sudo wdutil) on recent macOS.")
     print("  • Service checks only connect to common identification ports; they do not exploit hosts.")
+    print("  • Bluetooth list is paired/known devices only (silent); nearby unpaired scan needs `bleak`.")
     print("  • For deeper fingerprinting (JA3/JA4 TLS, p0f, full OUI), install optional libs — see README.")
     if net and ipaddress.IPv4Network(net).prefixlen < 24:
         print("  • Subnet is larger than /24; discovery was limited to this host's /24.")
@@ -2515,6 +2656,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         print(_c(Style.DIM, "  Looking up public IP…"))
         public = public_ip_info()
 
+    bluetooth: dict[str, Any] = {}
+    if not getattr(args, "no_bluetooth", False):
+        print(_c(Style.DIM, "  Reading paired/connected Bluetooth (silent, local only)…"))
+        bluetooth = collect_bluetooth()
+
     hosts: list[Host] = []
     subnet = wifi.get("subnet")
     if subnet:
@@ -2538,11 +2684,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "wifi": wifi,
         "wifi_summary": summarize_wifi(wifi),
         "public_ip": public,
+        "bluetooth": bluetooth,
         "hosts": [asdict(h) for h in hosts],
         "host_count": len(hosts),
         "other_host_count": len([h for h in hosts if not h.is_self]),
     }
-    return report, hosts, self_ips, device, wifi, public
+    return report, hosts, self_ips, device, wifi, public, bluetooth
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2558,6 +2705,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--subnet", help="Override subnet, e.g. 192.168.1.0/24")
     p.add_argument("--mdns-seconds", type=float, default=3.0, help="How long to listen for Bonjour (default 3)")
     p.add_argument("--probe-timeout", type=float, default=0.45, help="Per-port connect timeout")
+    p.add_argument("--no-bluetooth", action="store_true", help="Skip the silent Bluetooth inventory")
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colors")
     return p.parse_args(argv)
 
@@ -2568,7 +2716,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.no_color:
         IS_TTY = False
     try:
-        report, hosts, self_ips, device, wifi, public = build_report(args)
+        report, hosts, self_ips, device, wifi, public, bluetooth = build_report(args)
     except KeyboardInterrupt:
         print("\nInterrupted.")
         return 130
@@ -2587,6 +2735,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print_device(device)
     print_wifi(wifi, public)
+    print_bluetooth(bluetooth)
     print_hosts(hosts, self_ips)
     print_exposure(hosts)
     print_notes(wifi.get("subnet"))
