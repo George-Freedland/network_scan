@@ -1,0 +1,10 @@
+# Optional dependencies for network_inventory.py
+# The script runs fully on the Python standard library; these only improve results.
+
+# Full offline IEEE OUI database for MAC-vendor resolution (auto-detected if installed).
+mac-vendor-lookup>=0.1.12
+
+# Heavier, optional analysis tools you may want for deeper work (not required by the script):
+# scapy>=2.5.0            # raw packet crafting / ARP / OS fingerprinting (needs root)
+# zeroconf>=0.131.0       # spec-complete mDNS/Bonjour browsing
+# async-upnp-client>=0.38 # fuller UPnP/SSDP discovery and control

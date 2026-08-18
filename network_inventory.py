@@ -4,10 +4,14 @@
 Collects:
   - this device (hardware, OS, interfaces, addresses, DNS, routes)
   - the active Wi-Fi / LAN session (SSID, PHY, DHCP, gateway, public IP)
-  - other hosts on the local subnet (IP, MAC, vendor, names, Bonjour, light services)
+  - other hosts on the local subnet (IP, MAC, vendor, names, Bonjour, SSDP/UPnP
+    model, TTL/OS guess, light service ID, and a defensive exposure assessment)
+
+Runs on the Python standard library alone (no root needed). Optional packages
+improve results if present (see README): mac-vendor-lookup for full offline OUI.
 
 Use only on networks you own or are authorized to inspect.
-Stdlib only. Tested on macOS; Linux fallbacks included.
+Tested on macOS; Linux fallbacks included.
 
   python3 network_inventory.py
   python3 network_inventory.py --json -o report.json
@@ -161,24 +165,102 @@ COMMON_MDNS_SERVICES = [
     "_esphomelib._tcp.local",
 ]
 
-# Identification-only ports (no payloads beyond a protocol greeting).
+# Identification-only ports. Connect (and, for a few, read a greeting) to tell
+# what a device is. "risk" flags plaintext / commonly-exposed admin surfaces so
+# the report can point them out — it never sends an exploit payload.
 IDENT_PORTS = [
-    (22, "ssh"),
-    (80, "http"),
-    (443, "https"),
-    (445, "smb"),
-    (548, "afp"),
-    (631, "ipp"),
-    (5000, "upnp-or-synology"),
-    (5357, "wsd"),
-    (7000, "airplay"),
-    (8008, "chromecast"),
-    (8009, "chromecast-tls"),
-    (8080, "http-alt"),
-    (8443, "https-alt"),
-    (9100, "jetdirect"),
-    (32400, "plex"),
-    (62078, "ios-lockdown"),
+    (21, "ftp", "plaintext file transfer"),
+    (22, "ssh", None),
+    (23, "telnet", "plaintext remote login (insecure)"),
+    (53, "dns", None),
+    (80, "http", None),
+    (111, "rpcbind", None),
+    (135, "msrpc", "Windows RPC exposed"),
+    (139, "netbios-ssn", "legacy SMB/NetBIOS"),
+    (443, "https", None),
+    (445, "smb", "file sharing exposed"),
+    (515, "lpd", None),
+    (548, "afp", None),
+    (554, "rtsp", "camera / streaming"),
+    (631, "ipp", None),
+    (1883, "mqtt", "unauthenticated IoT bus if open"),
+    (1900, "ssdp/upnp", None),
+    (2323, "telnet-alt", "plaintext remote login (insecure)"),
+    (3306, "mysql", "database exposed to LAN"),
+    (3389, "rdp", "remote desktop exposed"),
+    (5000, "upnp-airplay", None),
+    (5001, "synology-https", None),
+    (5060, "sip", None),
+    (5357, "wsd", None),
+    (5432, "postgres", "database exposed to LAN"),
+    (5555, "adb", "Android debug bridge (if open, remote control)"),
+    (5900, "vnc", "remote desktop exposed"),
+    (6379, "redis", "unauthenticated cache if open"),
+    (7000, "airplay", None),
+    (8008, "chromecast", None),
+    (8009, "chromecast-tls", None),
+    (8080, "http-alt", None),
+    (8443, "https-alt", None),
+    (8883, "mqtt-tls", None),
+    (9000, "http-admin", None),
+    (9100, "jetdirect", "raw printing"),
+    (32400, "plex", None),
+    (49152, "upnp-http", None),
+    (62078, "ios-lockdown", None),
+]
+
+# Apple model identifiers (from mDNS _device-info "model=" and UPnP) -> readable.
+APPLE_MODELS: dict[str, str] = {
+    "MacBookAir10,1": "MacBook Air (M1, 2020)",
+    "MacBookAir": "MacBook Air",
+    "MacBookPro": "MacBook Pro",
+    "MacBook": "MacBook",
+    "Macmini": "Mac mini",
+    "iMac": "iMac",
+    "MacStudio": "Mac Studio",
+    "MacPro": "Mac Pro",
+    "iPhone": "iPhone",
+    "iPad": "iPad",
+    "iPod": "iPod touch",
+    "Watch": "Apple Watch",
+    "AudioAccessory": "HomePod",
+    "AppleTV": "Apple TV",
+    "J413AP": "MacBook Air (M2)",
+    "RP": "AirPort / Time Capsule",
+}
+
+# UPnP / SSDP server & model substrings -> friendly device class.
+SSDP_HINTS = [
+    ("samsung", "Samsung TV"),
+    ("lg electronics", "LG TV"),
+    ("webos", "LG TV"),
+    ("roku", "Roku"),
+    ("sonos", "Sonos speaker"),
+    ("chromecast", "Chromecast"),
+    ("bravia", "Sony Bravia TV"),
+    ("vizio", "Vizio TV"),
+    ("hisense", "Hisense TV"),
+    ("tcl", "TCL TV"),
+    ("xbox", "Xbox"),
+    ("playstation", "PlayStation"),
+    ("directv", "DirecTV receiver"),
+    ("denon", "Denon receiver"),
+    ("yamaha", "Yamaha receiver"),
+    ("bose", "Bose speaker"),
+    ("printer", "Printer"),
+    ("synology", "Synology NAS"),
+    ("qnap", "QNAP NAS"),
+    ("plex", "Plex server"),
+    ("router", "Router / gateway"),
+    ("gateway", "Router / gateway"),
+    ("wemo", "Belkin Wemo"),
+    ("hue", "Philips Hue bridge"),
+    ("ring", "Ring device"),
+    ("nest", "Google Nest"),
+    ("shield", "NVIDIA Shield"),
+    ("fire tv", "Amazon Fire TV"),
+    ("echo", "Amazon Echo"),
+    ("kodi", "Kodi / media center"),
 ]
 
 OUI_FALLBACK: dict[str, str] = {
@@ -352,6 +434,11 @@ class Host:
     txt: dict[str, str] = field(default_factory=dict)
     open_ports: list[str] = field(default_factory=list)
     banners: dict[str, str] = field(default_factory=dict)
+    ssdp: dict[str, str] = field(default_factory=dict)
+    model: str | None = None
+    os_guess: str | None = None
+    ttl: int | None = None
+    risks: list[str] = field(default_factory=list)
     guessed_type: str | None = None
     is_self: bool = False
     is_gateway: bool = False
@@ -1384,6 +1471,206 @@ def netbios_name(ip: str, timeout: float = 0.6) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# SSDP / UPnP discovery (device model, manufacturer, friendly name)
+# ---------------------------------------------------------------------------
+
+SSDP_ADDR = ("239.255.255.250", 1900)
+
+
+def ssdp_discover(seconds: float = 3.0, lan_ip: str | None = None) -> dict[str, dict[str, str]]:
+    """M-SEARCH the LAN; return {ip: {header: value, ...}} incl. LOCATION."""
+    targets = ("ssdp:all", "upnp:rootdevice")
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setblocking(False)
+        if lan_ip:
+            sock.bind((lan_ip, 0))
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(lan_ip))
+            except OSError:
+                pass
+        else:
+            sock.bind(("", 0))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("B", 2))
+    except OSError:
+        return {}
+
+    for st in targets:
+        msg = (
+            "M-SEARCH * HTTP/1.1\r\n"
+            f"HOST: {SSDP_ADDR[0]}:{SSDP_ADDR[1]}\r\n"
+            'MAN: "ssdp:discover"\r\n'
+            "MX: 2\r\n"
+            f"ST: {st}\r\n\r\n"
+        ).encode()
+        try:
+            sock.sendto(msg, SSDP_ADDR)
+        except OSError:
+            pass
+
+    results: dict[str, dict[str, str]] = {}
+    deadline = time.time() + seconds
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        ready, _, _ = select.select([sock], [], [], min(0.4, remaining))
+        if not ready:
+            continue
+        try:
+            data, addr = sock.recvfrom(4096)
+        except OSError:
+            break
+        ip = addr[0]
+        headers: dict[str, str] = {}
+        for line in data.decode("utf-8", errors="replace").split("\r\n")[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().upper()] = v.strip()
+        if headers:
+            results.setdefault(ip, {}).update(headers)
+    sock.close()
+    return results
+
+
+def fetch_upnp_description(location: str, timeout: float = 2.5) -> dict[str, str]:
+    try:
+        req = urllib.request.Request(location, headers={"User-Agent": "network-inventory/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            xml = resp.read(8192).decode("utf-8", errors="replace")
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {}
+    fields = {}
+    for tag in (
+        "friendlyName",
+        "manufacturer",
+        "modelName",
+        "modelNumber",
+        "modelDescription",
+        "serialNumber",
+        "deviceType",
+    ):
+        m = re.search(rf"<{tag}>([^<]+)</{tag}>", xml, re.I)
+        if m:
+            val = re.sub(r"\s+", " ", m.group(1)).strip()
+            if val:
+                fields[tag] = val[:120]
+    return fields
+
+
+def collect_ssdp(hosts: dict[str, "Host"], net: ipaddress.IPv4Network, lan_ip: str | None, seconds: float) -> None:
+    raw = ssdp_discover(seconds=seconds, lan_ip=lan_ip)
+    locations: dict[str, str] = {}
+    for ip, headers in raw.items():
+        if not is_unicast_ipv4(ip) or ipaddress.IPv4Address(ip) not in net:
+            continue
+        server = headers.get("SERVER")
+        merge_host(hosts, ip, source=["ssdp"])
+        host = hosts[ip]
+        if server:
+            host.ssdp.setdefault("server", server)
+        if headers.get("LOCATION"):
+            locations[ip] = headers["LOCATION"]
+
+    def resolve(item: tuple[str, str]) -> None:
+        ip, location = item
+        desc = fetch_upnp_description(location)
+        if not desc:
+            return
+        host = hosts.get(ip)
+        if host is None:
+            return
+        for k, v in desc.items():
+            host.ssdp[k] = v
+        friendly = desc.get("friendlyName")
+        model = desc.get("modelName")
+        if friendly and friendly not in host.names:
+            host.names.insert(0, friendly)
+        if model and not host.model:
+            host.model = " ".join(x for x in (desc.get("manufacturer"), model, desc.get("modelNumber")) if x)
+
+    if locations:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(resolve, locations.items()))
+
+
+def apple_model_name(code: str | None) -> str | None:
+    if not code:
+        return None
+    code = code.strip()
+    if code in APPLE_MODELS:
+        return APPLE_MODELS[code]
+    for prefix, name in APPLE_MODELS.items():
+        if code.startswith(prefix):
+            return name
+    return None
+
+
+# ---------------------------------------------------------------------------
+# OS guess from TTL
+# ---------------------------------------------------------------------------
+
+def ping_ttl(ip: str) -> int | None:
+    if sys.platform == "darwin":
+        cmd = ["ping", "-c", "1", "-t", "1", ip]
+    else:
+        cmd = ["ping", "-c", "1", "-W", "1", ip]
+    code, out, _ = run_ok(cmd, timeout=2.5)
+    if code != 0:
+        return None
+    m = re.search(r"ttl[=\s](\d+)", out, re.I)
+    return int(m.group(1)) if m else None
+
+
+def os_from_ttl(ttl: int | None) -> str | None:
+    if ttl is None:
+        return None
+    # Guess the sender's initial TTL. Common initial values: 255 (net gear),
+    # 128 (Windows), 64 (unix/apple/android), 32 (some IoT/embedded stacks).
+    for base, label in ((32, "IoT / embedded stack"),
+                        (64, "Linux / macOS / iOS / Android"),
+                        (128, "Windows"),
+                        (255, "network gear / router / printer")):
+        if ttl <= base:
+            hops = base - ttl
+            if hops > 8:
+                # More hops than any LAN path — initial TTL is nonstandard.
+                return f"TTL {ttl} (nonstandard initial TTL — device type unclear)"
+            hop_txt = "same subnet" if hops == 0 else f"~{hops} hop{'s' if hops != 1 else ''}"
+            return f"{label} (TTL {ttl}, {hop_txt})"
+    return f"TTL {ttl}"
+
+
+# ---------------------------------------------------------------------------
+# Defensive exposure assessment (identification only — no exploitation)
+# ---------------------------------------------------------------------------
+
+def assess_risks(host: "Host") -> list[str]:
+    risks = list(host.risks)
+    for port, banner in host.banners.items():
+        low = banner.lower()
+        if "http" in low and "server" in low and any(
+            s in low for s in ("boa", "goahead", "lighttpd/1.4.1", "micro_httpd")
+        ):
+            risks.append(f"port {port}: embedded web server often shipped with default creds")
+        if re.search(r"openssh_[0-6]\.", low):
+            risks.append(f"port {port}: very old OpenSSH banner — likely unpatched")
+    if any(p.startswith(("23/", "2323/")) for p in host.open_ports):
+        pass  # already flagged in probe
+    if host.is_gateway and any(p.startswith(("80/", "8080/")) for p in host.open_ports):
+        risks.append("router admin page reachable over plain HTTP on the LAN")
+    # de-dupe, keep order
+    seen: set[str] = set()
+    out = []
+    for r in risks:
+        if r not in seen:
+            seen.add(r)
+            out.append(r)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Light service identification
 # ---------------------------------------------------------------------------
 
@@ -1395,25 +1682,30 @@ def probe_port(ip: str, port: int, timeout: float = 0.45) -> tuple[bool, str | N
     banner = None
     try:
         sock.settimeout(timeout)
-        if port in {80, 8080, 8008, 631, 5000}:
-            sock.sendall(f"HEAD / HTTP/1.0\r\nHost: {ip}\r\n\r\n".encode())
-            data = sock.recv(512)
-            banner = data.decode("utf-8", errors="replace").split("\r\n")[0][:160]
+        if port in {80, 8080, 8008, 5000, 8443, 9000, 49152}:
+            sock.sendall(
+                f"GET / HTTP/1.0\r\nHost: {ip}\r\nUser-Agent: network-inventory\r\n\r\n".encode()
+            )
+            data = sock.recv(2048)
+            text = data.decode("latin-1", errors="replace")
             server = None
             title = None
-            text = data.decode("latin-1", errors="replace")
             m = re.search(r"^Server:\s*(.+)$", text, re.I | re.M)
             if m:
                 server = m.group(1).strip()
-            banner = server or banner
-        elif port in {443, 8443, 8009}:
-            banner = "tls-handshake-possible"
-        elif port == 22:
-            data = sock.recv(128)
-            banner = data.decode("utf-8", errors="replace").strip()[:120]
+            m = re.search(r"<title[^>]*>([^<]+)</title>", text, re.I)
+            if m:
+                title = re.sub(r"\s+", " ", m.group(1)).strip()[:80]
+            status = text.split("\r\n", 1)[0][:40]
+            banner = " | ".join(b for b in (title, server, status) if b) or None
+        elif port in {443, 8009, 8883}:
+            banner = "tls (encrypted)"
+        elif port in {22, 21, 23, 2323, 25, 110, 143, 3306, 5432, 6379}:
+            data = sock.recv(160)
+            banner = data.decode("utf-8", errors="replace").strip()[:120] or None
         else:
             try:
-                data = sock.recv(64)
+                data = sock.recv(96)
                 if data:
                     banner = data.decode("utf-8", errors="replace").strip()[:120]
             except OSError:
@@ -1428,16 +1720,19 @@ def probe_port(ip: str, port: int, timeout: float = 0.45) -> tuple[bool, str | N
     return True, banner
 
 
-def probe_host(ip: str, timeout: float) -> tuple[list[str], dict[str, str]]:
+def probe_host(ip: str, timeout: float) -> tuple[list[str], dict[str, str], list[str]]:
     open_ports: list[str] = []
     banners: dict[str, str] = {}
-    for port, label in IDENT_PORTS:
+    risks: list[str] = []
+    for port, label, risk in IDENT_PORTS:
         ok, banner = probe_port(ip, port, timeout=timeout)
         if ok:
             open_ports.append(f"{port}/{label}")
             if banner:
                 banners[str(port)] = banner
-    return open_ports, banners
+            if risk:
+                risks.append(f"{label} open ({port}) — {risk}")
+    return open_ports, banners, risks
 
 
 def gateway_http_title(ip: str, timeout: float = 2.0) -> str | None:
@@ -1506,10 +1801,40 @@ def load_local_manuf() -> dict[str, str]:
     return mapping
 
 
+_mvl_lookup: Any = None
+_mvl_tried = False
+
+
+def _optional_mac_vendor(mac: str) -> str | None:
+    """Use the optional `mac-vendor-lookup` package (full IEEE OUI DB) if installed."""
+    global _mvl_lookup, _mvl_tried
+    if not _mvl_tried:
+        _mvl_tried = True
+        try:
+            from mac_vendor_lookup import MacLookup  # type: ignore
+
+            _mvl_lookup = MacLookup()
+        except Exception:
+            _mvl_lookup = None
+    if _mvl_lookup is None:
+        return None
+    try:
+        return _mvl_lookup.lookup(mac)
+    except Exception:
+        return None
+
+
 def vendor_offline(mac: str) -> str | None:
     n = norm_mac(mac)
     if not n:
         return None
+    # locally administered / randomized bit takes priority — the OUI is meaningless.
+    try:
+        first = int(n.split(":")[0], 16)
+        if first & 0x02:
+            return "locally administered MAC (often randomized / private Wi-Fi)"
+    except ValueError:
+        pass
     if any(n.upper().startswith(p) for p in APPLE_OUI_HINTS):
         return "Apple"
     p24 = mac_prefix24(n)
@@ -1518,13 +1843,9 @@ def vendor_offline(mac: str) -> str | None:
         return manuf[p24]
     if p24 in OUI_FALLBACK:
         return OUI_FALLBACK[p24]
-    # locally administered
-    try:
-        first = int(n.split(":")[0], 16)
-        if first & 0x02:
-            return "locally administered MAC (often randomized / private Wi-Fi)"
-    except ValueError:
-        pass
+    lib = _optional_mac_vendor(n)
+    if lib:
+        return lib
     return None
 
 
@@ -1549,15 +1870,29 @@ def vendor_online(mac: str, timeout: float = 3.0) -> str | None:
 # ---------------------------------------------------------------------------
 
 def guess_type(host: Host) -> str:
-    blob = " ".join(
+    # Advertised identity (device chose to announce this) — trustworthy for TV/IoT hints.
+    adv_blob = " ".join(
         [
             " ".join(host.names),
+            host.model or "",
+            " ".join(host.ssdp.values()),
             " ".join(host.mdns_services),
+        ]
+    ).lower()
+    # Everything, including port labels — used for weaker keyword rules.
+    blob = " ".join(
+        [
+            adv_blob,
             " ".join(host.open_ports),
             host.vendor or "",
             " ".join(host.txt.values()),
         ]
     ).lower()
+
+    for needle, label in SSDP_HINTS:
+        if needle in adv_blob:
+            return label
+
     rules = [
         ("samsung", "Samsung TV / device"),
         ("ps4", "PlayStation 4"),
@@ -1612,8 +1947,12 @@ def guess_type(host: Host) -> str:
             return label
     if host.is_gateway:
         return "Router / gateway"
-    if host.vendor:
+    if host.model:
+        return host.model
+    if host.vendor and "randomized" not in host.vendor and "administered" not in host.vendor:
         return f"Host ({host.vendor})"
+    if host.os_guess and host.os_guess[0].isalpha() and not host.os_guess.startswith("TTL"):
+        return f"Unidentified {host.os_guess.split(' (')[0]} host"
     return "Unknown host"
 
 
@@ -1775,6 +2114,9 @@ def discover_hosts(
     records = mdns_browse(seconds=mdns_seconds, lan_ip=lan_ip)
     apply_mdns(hosts, records)
 
+    print(_c(Style.DIM, f"  Searching SSDP/UPnP for {mdns_seconds:.1f}s (device models)…"))
+    collect_ssdp(hosts, net, lan_ip, seconds=mdns_seconds)
+
     # Drop mDNS A records that are off-subnet (e.g. VPN / public)
     off_subnet = [
         ip
@@ -1837,10 +2179,13 @@ def discover_hosts(
     if probe:
         print(_c(Style.DIM, "  Identifying common services (connect-only, no exploits)…"))
         def do_probe(ip: str) -> None:
-            ports, banners = probe_host(ip, timeout=probe_timeout)
+            ports, banners, risks = probe_host(ip, timeout=probe_timeout)
             host = hosts[ip]
             host.open_ports = ports
             host.banners = banners
+            host.risks = risks
+            host.ttl = ping_ttl(ip)
+            host.os_guess = os_from_ttl(host.ttl)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=32) as pool:
             list(pool.map(do_probe, list(hosts.keys())))
@@ -1862,6 +2207,15 @@ def discover_hosts(
             seen.add(key)
             clean.append(n.rstrip("."))
         host.names = clean
+        # Resolve device model from mDNS device-info TXT / SSDP
+        if not host.model:
+            code = host.txt.get("model") or host.txt.get("am")
+            friendly = apple_model_name(code)
+            if friendly:
+                host.model = friendly
+            elif code and len(code) <= 40:
+                host.model = code
+        host.risks = assess_risks(host)
         host.guessed_type = guess_type(host)
 
     def keep(h: Host) -> bool:
@@ -2073,12 +2427,20 @@ def print_hosts(hosts: list[Host], self_ips: set[str]) -> None:
         print()
         print(_c(Style.BOLD + Style.GREEN, f"  {title}") + _c(Style.YELLOW, tag))
         kv("Type", host.guessed_type, indent=4)
+        kv("Model", host.model, indent=4)
+        kv("OS guess", host.os_guess, indent=4)
         kv("MAC", host.mac, indent=4)
         kv("Vendor", host.vendor, indent=4)
         kv("Names", host.names, indent=4)
         kv("IPv6", [a for a in host.ipv6 if not a.lower().startswith("fe80:")] or None, indent=4)
         kv("Link-local v6", [a for a in host.ipv6 if a.lower().startswith("fe80:")] or None, indent=4)
         kv("Bonjour services", host.mdns_services, indent=4)
+        if host.ssdp:
+            bits = [f"{k}={v}" for k, v in host.ssdp.items() if k != "server"]
+            if host.ssdp.get("server"):
+                bits.append(f"server={host.ssdp['server']}")
+            if bits:
+                kv("UPnP/SSDP", "; ".join(bits), indent=4)
         if host.txt:
             interesting = {k: v for k, v in host.txt.items() if k.lower() in {
                 "model", "am", "fn", "md", "ty", "rp", "f", "gateway_http",
@@ -2089,15 +2451,41 @@ def print_hosts(hosts: list[Host], self_ips: set[str]) -> None:
         kv("Open ident ports", host.open_ports, indent=4)
         if host.banners:
             kv("Banners", "; ".join(f"{k}: {v}" for k, v in host.banners.items()), indent=4)
+        if host.risks:
+            print(f"    {_c(Style.YELLOW + Style.BOLD, 'Exposure:')}")
+            for r in host.risks:
+                print(f"      {_c(Style.YELLOW, '• ' + r)}")
         kv("Seen via", host.source, indent=4)
+
+
+def print_exposure(hosts: list[Host]) -> None:
+    flagged = [h for h in hosts if h.risks]
+    heading(f"Exposure findings  ({len(flagged)} host(s) with notes)")
+    if not flagged:
+        print("  No plaintext/admin services detected on the scanned ports. Good.")
+        return
+    print(_c(Style.DIM, "  Informational only — services reachable on the LAN, not exploited."))
+    for host in flagged:
+        label = host.guessed_type or "host"
+        name = host.names[0] if host.names else ""
+        header = f"{host.ip}  {label}" + (f"  ({name})" if name else "")
+        print()
+        print(_c(Style.BOLD, f"  {header}"))
+        for r in host.risks:
+            print(f"      {_c(Style.YELLOW, '• ' + r)}")
+    print()
+    print(_c(Style.DIM, "  Hardening ideas: disable Telnet/plaintext admin, put IoT on a guest"))
+    print(_c(Style.DIM, "  VLAN/SSID, patch firmware, and require strong unique device passwords."))
 
 
 def print_notes(net: str | None) -> None:
     heading("Notes")
     print("  • Sleeping phones often omit ARP until they talk; rerun while they are awake.")
     print("  • Randomized Wi-Fi MACs hide the real vendor — that is expected on modern phones.")
+    print("  • SSDP/UPnP + mDNS reveal models only for devices that advertise them.")
     print("  • BSSID / some Wi-Fi fields need Location permission (or sudo wdutil) on recent macOS.")
     print("  • Service checks only connect to common identification ports; they do not exploit hosts.")
+    print("  • For deeper fingerprinting (JA3/JA4 TLS, p0f, full OUI), install optional libs — see README.")
     if net and ipaddress.IPv4Network(net).prefixlen < 24:
         print("  • Subnet is larger than /24; discovery was limited to this host's /24.")
     print("  • Only use this on networks you own or have permission to inventory.")
@@ -2200,6 +2588,7 @@ def main(argv: list[str] | None = None) -> int:
     print_device(device)
     print_wifi(wifi, public)
     print_hosts(hosts, self_ips)
+    print_exposure(hosts)
     print_notes(wifi.get("subnet"))
     print()
     return 0
